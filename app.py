@@ -8,7 +8,6 @@ from utils import (
     check_similarity,
     get_dashboard_stats,
     generate_timeline,
-    metadata
 )
 # 🔐 Initialize session state (separate user memory)
 
@@ -145,4 +144,5 @@ if st.button("Submit"):
 
         st.subheader("NeuroVault Response")
         st.write(response)
+
 
