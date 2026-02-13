@@ -8,22 +8,70 @@ from utils import (
     check_similarity,
     get_dashboard_stats,
     generate_timeline,
+    init_session
 )
-
-# 🔐 Initialize session state (per-user isolation)
-if "documents" not in st.session_state:
-    st.session_state.documents = []
-
-if "metadata" not in st.session_state:
-    st.session_state.metadata = []
 
 st.set_page_config(page_title="NeuroVault AI", layout="wide")
 
+# =========================
+# INIT SESSION
+# =========================
+
+init_session()
+
 st.title("🧠 NeuroVault - AI Storage Intelligence System")
 
-# =====================
-# DASHBOARD
-# =====================
+# =========================
+# FILE UPLOAD
+# =========================
+
+uploaded_files = st.file_uploader(
+    "Upload PDF files",
+    type="pdf",
+    accept_multiple_files=True
+)
+
+# Detect removed files
+current_filenames = [file.name for file in uploaded_files] if uploaded_files else []
+
+stored_filenames = [file["filename"] for file in st.session_state.metadata]
+
+# If files removed from uploader → remove from memory
+for stored in stored_filenames:
+    if stored not in current_filenames:
+        index_to_remove = next(
+            i for i, file in enumerate(st.session_state.metadata)
+            if file["filename"] == stored
+        )
+
+        st.session_state.metadata.pop(index_to_remove)
+        st.session_state.documents.pop(index_to_remove)
+
+# Rebuild FAISS index if files removed
+if len(st.session_state.documents) > 0:
+    import faiss
+    import numpy as np
+
+    st.session_state.index = faiss.IndexFlatL2(384)
+
+    embeddings = st.session_state.embed_model.encode(
+        st.session_state.documents
+    )
+
+    st.session_state.index.add(np.array(embeddings).astype("float32"))
+
+# Add new files
+if uploaded_files:
+    for file in uploaded_files:
+        if file.name not in stored_filenames:
+            text, pages = extract_text(file)
+            add_to_index(text, file.name, pages)
+
+    st.success("Files indexed successfully!")
+
+# =========================
+# DASHBOARD (AFTER UPLOAD)
+# =========================
 
 st.sidebar.header("📊 Storage Dashboard")
 
@@ -35,28 +83,9 @@ st.sidebar.metric("Total Words Indexed", total_words)
 
 st.markdown("---")
 
-# =====================
-# FILE UPLOAD
-# =====================
-
-uploaded_files = st.file_uploader(
-    "Upload PDF files",
-    type="pdf",
-    accept_multiple_files=True
-)
-
-if uploaded_files:
-    for file in uploaded_files:
-        text, pages = extract_text(file)
-        add_to_index(text, file.name, pages)
-
-    st.success("Files indexed successfully!")
-
-st.markdown("---")
-
-# =====================
+# =========================
 # QUICK ACTIONS
-# =====================
+# =========================
 
 col1, col2, col3, col4, col5 = st.columns(5)
 
@@ -64,7 +93,7 @@ col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
     if st.button("📌 Important Files"):
         important = get_important_files()
-        if len(st.session_state.metadata) == 0:
+        if total_files == 0:
             st.warning("No files uploaded.")
         else:
             for file in important:
@@ -92,7 +121,7 @@ with col3:
 # Summarize Latest
 with col4:
     if st.button("📝 Summarize Latest"):
-        if len(st.session_state.metadata) == 0:
+        if total_files == 0:
             st.warning("No files uploaded.")
         else:
             latest = st.session_state.metadata[-1]
@@ -114,16 +143,16 @@ with col5:
 
 st.markdown("---")
 
-# =====================
+# =========================
 # CHAT
-# =====================
+# =========================
 
 st.subheader("💬 Ask NeuroVault")
 
 question = st.text_input("Type your question")
 
 if st.button("Submit"):
-    if len(st.session_state.metadata) == 0:
+    if total_files == 0:
         st.warning("Upload at least one file first.")
     elif question.strip() == "":
         st.warning("Please enter a question.")
