@@ -207,3 +207,4 @@ def generate_timeline():
 
     return timeline
 
+
