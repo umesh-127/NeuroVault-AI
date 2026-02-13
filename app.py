@@ -9,14 +9,13 @@ from utils import (
     get_dashboard_stats,
     generate_timeline,
 )
-# 🔐 Initialize session state (separate user memory)
 
+# 🔐 Initialize session state (per-user isolation)
 if "documents" not in st.session_state:
     st.session_state.documents = []
 
 if "metadata" not in st.session_state:
     st.session_state.metadata = []
-
 
 st.set_page_config(page_title="NeuroVault AI", layout="wide")
 
@@ -65,7 +64,7 @@ col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
     if st.button("📌 Important Files"):
         important = get_important_files()
-        if not important:
+        if len(st.session_state.metadata) == 0:
             st.warning("No files uploaded.")
         else:
             for file in important:
@@ -93,10 +92,10 @@ with col3:
 # Summarize Latest
 with col4:
     if st.button("📝 Summarize Latest"):
-        if not metadata:
+        if len(st.session_state.metadata) == 0:
             st.warning("No files uploaded.")
         else:
-            latest = metadata[-1]
+            latest = st.session_state.metadata[-1]
             prompt = f"Summarize this document:\n\n{latest['content'][:2000]}"
             summary = generate_response(prompt)
             st.write(summary)
@@ -124,7 +123,7 @@ st.subheader("💬 Ask NeuroVault")
 question = st.text_input("Type your question")
 
 if st.button("Submit"):
-    if not metadata:
+    if len(st.session_state.metadata) == 0:
         st.warning("Upload at least one file first.")
     elif question.strip() == "":
         st.warning("Please enter a question.")
@@ -144,5 +143,3 @@ if st.button("Submit"):
 
         st.subheader("NeuroVault Response")
         st.write(response)
-
-
