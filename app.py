@@ -10,6 +10,14 @@ from utils import (
     generate_timeline,
     metadata
 )
+# 🔐 Initialize session state (separate user memory)
+
+if "documents" not in st.session_state:
+    st.session_state.documents = []
+
+if "metadata" not in st.session_state:
+    st.session_state.metadata = []
+
 
 st.set_page_config(page_title="NeuroVault AI", layout="wide")
 
@@ -137,3 +145,4 @@ if st.button("Submit"):
 
         st.subheader("NeuroVault Response")
         st.write(response)
+
