@@ -8,10 +8,12 @@ import faiss
 # =============================
 # IBM MODEL (SAFE)
 # =============================
+import streamlit as st
 
 api_key = st.secrets["IBM_API_KEY"]
 project_id = st.secrets["IBM_PROJECT_ID"]
 url = st.secrets["IBM_URL"]
+
 
 model = Model(
     model_id="ibm/granite-3-8b-instruct",
@@ -206,5 +208,6 @@ def generate_timeline():
             timeline.append((file1, file2, evolution))
 
     return timeline
+
 
 
