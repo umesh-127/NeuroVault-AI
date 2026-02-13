@@ -206,3 +206,4 @@ def generate_timeline():
             timeline.append((file1, file2, evolution))
 
     return timeline
+
