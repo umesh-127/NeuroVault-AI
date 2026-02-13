@@ -1,0 +1,7 @@
+streamlit
+ibm-watsonx-ai
+sentence-transformers
+numpy
+PyPDF2
+faiss-cpu
+torch
