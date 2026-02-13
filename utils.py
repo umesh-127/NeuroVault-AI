@@ -1,52 +1,9 @@
+import streamlit as st
 from ibm_watsonx_ai.foundation_models import Model
 from sentence_transformers import SentenceTransformer
 import numpy as np
 import PyPDF2
-import streamlit as st
 import faiss
-
-# =============================
-# IBM MODEL (SAFE)
-# =============================
-import streamlit as st
-
-api_key = st.secrets["IBM_API_KEY"]
-project_id = st.secrets["IBM_PROJECT_ID"]
-url = st.secrets["IBM_URL"]
-
-
-model = Model(
-    model_id="ibm/granite-3-8b-instruct",
-    params={
-        "max_new_tokens": 300,
-        "temperature": 0.3
-    },
-    credentials={
-        "apikey": api_key,
-        "url": url
-    },
-    project_id=project_id
-)
-
-def generate_response(prompt):
-    response = model.generate(prompt)
-    return response["results"][0]["generated_text"]
-
-# =============================
-# PDF Extraction
-# =============================
-
-def extract_text(file):
-    reader = PyPDF2.PdfReader(file)
-    text = ""
-    pages = len(reader.pages)
-
-    for page in reader.pages:
-        page_text = page.extract_text()
-        if page_text:
-            text += page_text
-
-    return text, pages
 
 # =============================
 # SESSION INITIALIZATION
@@ -64,6 +21,61 @@ def init_session():
 
     if "embed_model" not in st.session_state:
         st.session_state.embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+    if "model" not in st.session_state:
+        initialize_ibm_model()
+
+
+# =============================
+# IBM MODEL (LAZY LOAD)
+# =============================
+
+def initialize_ibm_model():
+    try:
+        api_key = st.secrets["IBM_API_KEY"]
+        project_id = st.secrets["IBM_PROJECT_ID"]
+        url = st.secrets["IBM_URL"]
+
+        st.session_state.model = Model(
+            model_id="ibm/granite-3-8b-instruct",
+            params={
+                "max_new_tokens": 300,
+                "temperature": 0.3
+            },
+            credentials={
+                "apikey": api_key,
+                "url": url
+            },
+            project_id=project_id
+        )
+
+    except Exception as e:
+        st.error("IBM Model Initialization Failed. Check Secrets.")
+        st.stop()
+
+
+def generate_response(prompt):
+    init_session()
+    response = st.session_state.model.generate(prompt)
+    return response["results"][0]["generated_text"]
+
+
+# =============================
+# PDF Extraction
+# =============================
+
+def extract_text(file):
+    reader = PyPDF2.PdfReader(file)
+    text = ""
+    pages = len(reader.pages)
+
+    for page in reader.pages:
+        page_text = page.extract_text()
+        if page_text:
+            text += page_text
+
+    return text, pages
+
 
 # =============================
 # ADD FILE
@@ -96,6 +108,7 @@ def add_to_index(text, filename, pages):
         "content": text
     })
 
+
 # =============================
 # SEARCH
 # =============================
@@ -113,6 +126,7 @@ def search_query(query):
 
     return st.session_state.documents[I[0][0]]
 
+
 # =============================
 # IMPORTANT FILES
 # =============================
@@ -125,13 +139,13 @@ def get_important_files():
         reverse=True
     )
 
+
 # =============================
 # DUPLICATE CHECK
 # =============================
 
 def check_similarity():
     init_session()
-
     similarities = []
 
     for i in range(len(st.session_state.documents)):
@@ -156,6 +170,7 @@ def check_similarity():
 
     return similarities
 
+
 # =============================
 # DASHBOARD
 # =============================
@@ -169,13 +184,13 @@ def get_dashboard_stats():
 
     return total_files, total_pages, total_words
 
+
 # =============================
 # MEMORY TIMELINE
 # =============================
 
 def generate_timeline():
     init_session()
-
     similarities = check_similarity()
     timeline = []
 
@@ -208,6 +223,3 @@ def generate_timeline():
             timeline.append((file1, file2, evolution))
 
     return timeline
-
-
-
