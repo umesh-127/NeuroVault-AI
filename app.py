@@ -1,4 +1,8 @@
 import streamlit as st
+import os
+import faiss
+import numpy as np
+
 from utils import (
     extract_text,
     add_to_index,
@@ -8,16 +12,18 @@ from utils import (
     check_similarity,
     get_dashboard_stats,
     generate_timeline,
-    init_session
+    init_session,
+    load_existing_data
 )
 
 st.set_page_config(page_title="NeuroVault AI", layout="wide")
 
 # =========================
-# INIT SESSION
+# INIT SESSION + LOAD DATA
 # =========================
 
 init_session()
+load_existing_data()
 
 st.title("🧠 NeuroVault - AI Storage Intelligence System")
 
@@ -31,12 +37,18 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
-# Detect removed files
-current_filenames = [file.name for file in uploaded_files] if uploaded_files else []
+# Ensure storage folder exists
+os.makedirs("storage", exist_ok=True)
 
+# =========================
+# HANDLE FILE REMOVAL
+# =========================
+
+current_filenames = [file.name for file in uploaded_files] if uploaded_files else []
 stored_filenames = [file["filename"] for file in st.session_state.metadata]
 
-# If files removed from uploader → remove from memory
+files_removed = False
+
 for stored in stored_filenames:
     if stored not in current_filenames:
         index_to_remove = next(
@@ -44,33 +56,58 @@ for stored in stored_filenames:
             if file["filename"] == stored
         )
 
+        # Remove from session memory
         st.session_state.metadata.pop(index_to_remove)
         st.session_state.documents.pop(index_to_remove)
 
-# Rebuild FAISS index if files removed
-if len(st.session_state.documents) > 0:
-    import faiss
-    import numpy as np
+        # Remove from database
+        import sqlite3
+        conn = sqlite3.connect("database.db")
+        c = conn.cursor()
+        c.execute("DELETE FROM documents WHERE filename = ?", (stored,))
+        conn.commit()
+        conn.close()
 
+        # Remove physical file
+        file_path = os.path.join("storage", stored)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+        files_removed = True
+
+# Rebuild FAISS if something removed
+if files_removed:
     st.session_state.index = faiss.IndexFlatL2(384)
 
-    embeddings = st.session_state.embed_model.encode(
-        st.session_state.documents
-    )
+    if len(st.session_state.documents) > 0:
+        embeddings = st.session_state.embed_model.encode(
+            st.session_state.documents
+        )
+        st.session_state.index.add(
+            np.array(embeddings).astype("float32")
+        )
+        faiss.write_index(st.session_state.index, "faiss_index.index")
 
-    st.session_state.index.add(np.array(embeddings).astype("float32"))
+# =========================
+# ADD NEW FILES
+# =========================
 
-# Add new files
 if uploaded_files:
     for file in uploaded_files:
         if file.name not in stored_filenames:
+
+            # Save file physically
+            file_path = os.path.join("storage", file.name)
+            with open(file_path, "wb") as f:
+                f.write(file.getbuffer())
+
             text, pages = extract_text(file)
             add_to_index(text, file.name, pages)
 
     st.success("Files indexed successfully!")
 
 # =========================
-# DASHBOARD (AFTER UPLOAD)
+# DASHBOARD
 # =========================
 
 st.sidebar.header("📊 Storage Dashboard")
@@ -89,36 +126,33 @@ st.markdown("---")
 
 col1, col2, col3, col4, col5 = st.columns(5)
 
-# Important Files
 with col1:
     if st.button("📌 Important Files"):
-        important = get_important_files()
         if total_files == 0:
             st.warning("No files uploaded.")
         else:
+            important = get_important_files()
             for file in important:
                 st.write(f"{file['filename']} → Score: {file['importance_score']}")
 
-# Duplicate Check
 with col2:
     if st.button("🔍 Duplicate Check"):
-        sims = check_similarity()
-        found = False
+        if total_files < 2:
+            st.info("Upload at least 2 files to check similarity.")
+        else:
+            sims = check_similarity()
+            found = False
+            for file1, file2, sim in sims:
+                if sim > 0.75:
+                    st.write(f"{file1} and {file2} are {sim:.2f} similar")
+                    found = True
+            if not found:
+                st.info("No highly similar files detected.")
 
-        for file1, file2, sim in sims:
-            if sim > 0.75:
-                st.write(f"{file1} and {file2} are {sim:.2f} similar")
-                found = True
-
-        if not found:
-            st.info("No highly similar files detected.")
-
-# File Count
 with col3:
     if st.button("📊 File Count"):
         st.write(f"You have uploaded {total_files} files.")
 
-# Summarize Latest
 with col4:
     if st.button("📝 Summarize Latest"):
         if total_files == 0:
@@ -129,22 +163,23 @@ with col4:
             summary = generate_response(prompt)
             st.write(summary)
 
-# Memory Timeline
 with col5:
     if st.button("📈 Memory Timeline"):
-        timeline = generate_timeline()
-
-        if not timeline:
-            st.info("No version evolution detected.")
+        if total_files < 2:
+            st.info("Upload at least 2 files to detect evolution.")
         else:
-            for file1, file2, evolution in timeline:
-                st.subheader(f"{file1} → {file2}")
-                st.write(evolution)
+            timeline = generate_timeline()
+            if not timeline:
+                st.info("No version evolution detected.")
+            else:
+                for file1, file2, evolution in timeline:
+                    st.subheader(f"{file1} → {file2}")
+                    st.write(evolution)
 
 st.markdown("---")
 
 # =========================
-# CHAT
+# CHAT SECTION
 # =========================
 
 st.subheader("💬 Ask NeuroVault")
