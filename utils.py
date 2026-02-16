@@ -199,7 +199,7 @@ def search_query(query):
     query_vector = st.session_state.embed_model.encode([query])
 
     D, I = st.session_state.index.search(
-        np.array(query_vector).astype("float32"), k=1
+        np.array(query_vector).astype("float32"), k=3
     )
 
     return st.session_state.documents[I[0][0]]
@@ -303,3 +303,4 @@ def generate_timeline():
             timeline.append((file1, file2, evolution))
 
     return timeline
+
