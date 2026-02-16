@@ -1,15 +1,40 @@
 import streamlit as st
-from ibm_watsonx_ai.foundation_models import Model
-from sentence_transformers import SentenceTransformer
+import os
+import sqlite3
 import numpy as np
 import PyPDF2
 import faiss
+from ibm_watsonx_ai.foundation_models import Model
+from sentence_transformers import SentenceTransformer
+
+# =============================
+# DATABASE INITIALIZATION
+# =============================
+
+def init_db():
+    conn = sqlite3.connect("database.db")
+    c = conn.cursor()
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            filename TEXT,
+            content TEXT,
+            pages INTEGER,
+            words INTEGER
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
 
 # =============================
 # SESSION INITIALIZATION
 # =============================
 
 def init_session():
+
     if "documents" not in st.session_state:
         st.session_state.documents = []
 
@@ -27,7 +52,42 @@ def init_session():
 
 
 # =============================
-# IBM MODEL (LAZY LOAD)
+# LOAD EXISTING DATA (Persistent Memory)
+# =============================
+
+def load_existing_data():
+    init_session()
+    init_db()
+
+    # Load FAISS index if exists
+    if os.path.exists("faiss_index.index"):
+        st.session_state.index = faiss.read_index("faiss_index.index")
+
+    # Load stored documents from database
+    conn = sqlite3.connect("database.db")
+    c = conn.cursor()
+    c.execute("SELECT filename, content, pages, words FROM documents")
+    rows = c.fetchall()
+    conn.close()
+
+    for row in rows:
+        filename, content, pages, words = row
+
+        if content not in st.session_state.documents:
+
+            st.session_state.documents.append(content)
+
+            st.session_state.metadata.append({
+                "filename": filename,
+                "importance_score": 0,
+                "pages": pages,
+                "words": words,
+                "content": content
+            })
+
+
+# =============================
+# IBM MODEL (SAFE LOAD)
 # =============================
 
 def initialize_ibm_model():
@@ -49,7 +109,7 @@ def initialize_ibm_model():
             project_id=project_id
         )
 
-    except Exception as e:
+    except Exception:
         st.error("IBM Model Initialization Failed. Check Secrets.")
         st.stop()
 
@@ -61,7 +121,7 @@ def generate_response(prompt):
 
 
 # =============================
-# PDF Extraction
+# PDF EXTRACTION
 # =============================
 
 def extract_text(file):
@@ -78,15 +138,17 @@ def extract_text(file):
 
 
 # =============================
-# ADD FILE
+# ADD FILE (Persistent)
 # =============================
 
 def add_to_index(text, filename, pages):
     init_session()
+    init_db()
 
     if text in st.session_state.documents:
         return
 
+    # Add embedding
     embedding = st.session_state.embed_model.encode([text])
     st.session_state.index.add(np.array(embedding).astype("float32"))
 
@@ -100,13 +162,28 @@ def add_to_index(text, filename, pages):
     if len(text) > 2000:
         score += 1
 
-    st.session_state.metadata.append({
+    metadata_entry = {
         "filename": filename,
         "importance_score": score,
         "pages": pages,
         "words": len(text.split()),
         "content": text
-    })
+    }
+
+    st.session_state.metadata.append(metadata_entry)
+
+    # Save to database
+    conn = sqlite3.connect("database.db")
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO documents (filename, content, pages, words)
+        VALUES (?, ?, ?, ?)
+    """, (filename, text, pages, len(text.split())))
+    conn.commit()
+    conn.close()
+
+    # Save FAISS index permanently
+    faiss.write_index(st.session_state.index, "faiss_index.index")
 
 
 # =============================
@@ -120,6 +197,7 @@ def search_query(query):
         return "No documents indexed yet."
 
     query_vector = st.session_state.embed_model.encode([query])
+
     D, I = st.session_state.index.search(
         np.array(query_vector).astype("float32"), k=1
     )
@@ -148,17 +226,18 @@ def check_similarity():
     init_session()
     similarities = []
 
-    for i in range(len(st.session_state.documents)):
-        for j in range(i + 1, len(st.session_state.documents)):
+    docs = st.session_state.documents
+    embed_model = st.session_state.embed_model
 
-            vec1 = st.session_state.embed_model.encode(
-                [st.session_state.documents[i]]
-            )
-            vec2 = st.session_state.embed_model.encode(
-                [st.session_state.documents[j]]
-            )
+    embeddings = embed_model.encode(docs)
 
-            sim = np.dot(vec1, vec2.T)[0][0]
+    for i in range(len(docs)):
+        for j in range(i + 1, len(docs)):
+
+            sim = np.dot(
+                embeddings[i],
+                embeddings[j]
+            )
 
             similarities.append(
                 (
@@ -191,6 +270,7 @@ def get_dashboard_stats():
 
 def generate_timeline():
     init_session()
+
     similarities = check_similarity()
     timeline = []
 
