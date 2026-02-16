@@ -193,16 +193,30 @@ def add_to_index(text, filename, pages):
 def search_query(query):
     init_session()
 
+    # If no documents
     if len(st.session_state.documents) == 0:
         return "No documents indexed yet."
 
-    query_vector = st.session_state.embed_model.encode([query])
+    # If FAISS index is empty
+    if st.session_state.index.ntotal == 0:
+        return "Search index is empty."
 
+    query_vector = st.session_state.embed_model.encode([query])
     D, I = st.session_state.index.search(
-        np.array(query_vector).astype("float32"), k=3
+        np.array(query_vector).astype("float32"), k=1
     )
 
-    return st.session_state.documents[I[0][0]]
+    # Validate index result
+    if I is None or len(I) == 0:
+        return "No relevant document found."
+
+    idx = I[0][0]
+
+    if idx >= len(st.session_state.documents):
+        return "Search mismatch error. Try re-uploading the file."
+
+    return st.session_state.documents[idx]
+
 
 
 # =============================
@@ -303,4 +317,5 @@ def generate_timeline():
             timeline.append((file1, file2, evolution))
 
     return timeline
+
 
