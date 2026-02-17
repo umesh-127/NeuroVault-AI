@@ -5,28 +5,21 @@ from utils import (
     load_existing_data,
     extract_text,
     add_document,
-    delete_document,
     search_query,
-    generate_response,
-    get_dashboard_stats,
-    get_important_files,
-    check_similarity
+    generate_response
 )
 
-st.set_page_config(page_title="NeuroVault AI", layout="wide")
-
-# =========================
-# INITIALIZE SYSTEM
-# =========================
+st.set_page_config(page_title="NeuroVault 2.0", layout="wide")
 
 init_session()
 load_existing_data()
+
 os.makedirs("storage", exist_ok=True)
 
-st.title("🧠 NeuroVault - Persistent AI Memory System")
+st.title("🧠 NeuroVault 2.0 - Chunked Persistent RAG System")
 
 # =========================
-# FILE UPLOAD SECTION
+# FILE UPLOAD
 # =========================
 
 uploaded_files = st.file_uploader(
@@ -43,83 +36,10 @@ if uploaded_files:
             with open(file_path, "wb") as f:
                 f.write(file.getbuffer())
 
-            text, pages = extract_text(file)
-            success = add_document(text, file.name, pages)
+            text = extract_text(file)
+            add_document(text, file.name)
 
-            if success:
-                st.success(f"{file.name} indexed successfully!")
-
-# =========================
-# SIDEBAR DASHBOARD
-# =========================
-
-st.sidebar.header("📊 Storage Dashboard")
-
-total_files, total_pages, total_words = get_dashboard_stats()
-
-st.sidebar.metric("Total Files", total_files)
-st.sidebar.metric("Total Pages", total_pages)
-st.sidebar.metric("Total Words Indexed", total_words)
-
-st.sidebar.markdown("---")
-
-# =========================
-# DELETE FILE OPTION
-# =========================
-
-if total_files > 0:
-    st.sidebar.subheader("🗑 Delete File")
-    filenames = [file["filename"] for file in st.session_state.metadata]
-    selected = st.sidebar.selectbox("Select file", filenames)
-
-    if st.sidebar.button("Delete File"):
-        delete_document(selected)
-        st.success("File deleted successfully!")
-        st.rerun()
-
-# =========================
-# QUICK ACTION BUTTONS
-# =========================
-
-st.markdown("## ⚡ Quick Actions")
-
-col1, col2, col3 = st.columns(3)
-
-# Important Files
-with col1:
-    if st.button("📌 Important Files"):
-        if total_files == 0:
-            st.warning("No files uploaded.")
-        else:
-            important = get_important_files()
-            for file in important:
-                st.write(
-                    f"{file['filename']} → Score: {file['importance_score']}"
-                )
-
-# Duplicate Check
-with col2:
-    if st.button("🔍 Duplicate Check"):
-        if total_files < 2:
-            st.warning("Upload at least 2 files.")
-        else:
-            sims = check_similarity()
-            found = False
-            for file1, file2, sim in sims:
-                if sim > 0.80:
-                    st.write(
-                        f"{file1} and {file2} are {sim:.2f} similar"
-                    )
-                    found = True
-            if not found:
-                st.info("No highly similar documents found.")
-
-# File Count
-with col3:
-    if st.button("📊 File Count"):
-        st.info(f"You have uploaded {total_files} files.")
-
-st.markdown("---")
+            st.success(f"{file.name} indexed with chunk-based RAG!")
 
 # =========================
 # CHAT SECTION
@@ -130,26 +50,30 @@ st.subheader("💬 Ask NeuroVault")
 question = st.text_input("Type your question")
 
 if st.button("Submit Question"):
-    if total_files == 0:
-        st.warning("Upload at least one file first.")
-    elif question.strip() == "":
-        st.warning("Please enter a question.")
-    else:
-        relevant_docs = search_query(question)
 
-        if relevant_docs is None:
-            st.warning("No relevant document found.")
+    if question.strip() == "":
+        st.warning("Please enter a question.")
+
+    else:
+        relevant_chunks = search_query(question)
+
+        if relevant_chunks is None:
+            st.warning("No documents indexed yet.")
+
         else:
             prompt = f"""
 You are an intelligent AI assistant.
 
-Based on the following documents:
+Answer ONLY using the information provided below.
+If answer is not present, say "Information not found in documents."
 
-{relevant_docs}
+DOCUMENT CONTEXT:
+{relevant_chunks}
 
-Answer this question clearly and concisely:
-
+QUESTION:
 {question}
+
+Provide a clear and accurate answer.
 """
 
             response = generate_response(prompt)
