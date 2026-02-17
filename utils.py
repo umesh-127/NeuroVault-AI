@@ -11,6 +11,8 @@ DB_PATH = "database.db"
 INDEX_PATH = "faiss_index.index"
 STORAGE_FOLDER = "storage"
 EMBED_DIM = 384
+CHUNK_SIZE = 800
+CHUNK_OVERLAP = 200
 
 
 # =============================
@@ -22,12 +24,10 @@ def init_db():
     c = conn.cursor()
 
     c.execute("""
-        CREATE TABLE IF NOT EXISTS documents (
+        CREATE TABLE IF NOT EXISTS chunks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename TEXT UNIQUE,
-            content TEXT,
-            pages INTEGER,
-            words INTEGER
+            filename TEXT,
+            chunk_text TEXT
         )
     """)
 
@@ -39,21 +39,38 @@ def init_session():
     if "embed_model" not in st.session_state:
         st.session_state.embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-    if "documents" not in st.session_state:
-        st.session_state.documents = []
-
-    if "metadata" not in st.session_state:
-        st.session_state.metadata = []
-
     if "index" not in st.session_state:
-        st.session_state.index = faiss.IndexFlatL2(EMBED_DIM)
+        if os.path.exists(INDEX_PATH):
+            st.session_state.index = faiss.read_index(INDEX_PATH)
+        else:
+            st.session_state.index = faiss.IndexFlatL2(EMBED_DIM)
+
+    if "chunk_texts" not in st.session_state:
+        st.session_state.chunk_texts = []
 
     if "model" not in st.session_state:
         initialize_ibm_model()
 
 
 # =============================
-# LOAD DATA (PERSISTENT)
+# CHUNKING FUNCTION
+# =============================
+
+def chunk_text(text):
+    chunks = []
+    start = 0
+
+    while start < len(text):
+        end = start + CHUNK_SIZE
+        chunk = text[start:end]
+        chunks.append(chunk)
+        start += CHUNK_SIZE - CHUNK_OVERLAP
+
+    return chunks
+
+
+# =============================
+# LOAD EXISTING DATA
 # =============================
 
 def load_existing_data():
@@ -62,42 +79,22 @@ def load_existing_data():
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT filename, content, pages, words FROM documents")
+    c.execute("SELECT chunk_text FROM chunks")
     rows = c.fetchall()
     conn.close()
 
-    st.session_state.documents.clear()
-    st.session_state.metadata.clear()
-
-    for filename, content, pages, words in rows:
-
-        score = 0
-        if "final" in filename.lower():
-            score += 2
-        if "v2" in filename.lower() or "v3" in filename.lower():
-            score += 1
-        if words > 2000:
-            score += 1
-
-        st.session_state.documents.append(content)
-        st.session_state.metadata.append({
-            "filename": filename,
-            "pages": pages,
-            "words": words,
-            "content": content,
-            "importance_score": score
-        })
+    st.session_state.chunk_texts = [row[0] for row in rows]
 
     rebuild_index()
 
 
 def rebuild_index():
-    if len(st.session_state.documents) == 0:
+    if len(st.session_state.chunk_texts) == 0:
         st.session_state.index = faiss.IndexFlatL2(EMBED_DIM)
         return
 
     embeddings = st.session_state.embed_model.encode(
-        st.session_state.documents
+        st.session_state.chunk_texts
     )
 
     index = faiss.IndexFlatL2(EMBED_DIM)
@@ -118,7 +115,7 @@ def initialize_ibm_model():
 
     st.session_state.model = Model(
         model_id="ibm/granite-3-8b-instruct",
-        params={"max_new_tokens": 300, "temperature": 0.3},
+        params={"max_new_tokens": 400, "temperature": 0.2},
         credentials={"apikey": api_key, "url": url},
         project_id=project_id
     )
@@ -136,127 +133,58 @@ def generate_response(prompt):
 def extract_text(file):
     reader = PyPDF2.PdfReader(file)
     text = ""
-    pages = len(reader.pages)
 
     for page in reader.pages:
         page_text = page.extract_text()
         if page_text:
-            text += page_text
+            text += page_text + "\n"
 
-    return text, pages
+    return text
 
 
 # =============================
-# ADD DOCUMENT
+# ADD DOCUMENT (Chunk Based)
 # =============================
 
-def add_document(text, filename, pages):
+def add_document(text, filename):
+    init_db()
+
+    chunks = chunk_text(text)
+
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
-    try:
+    for chunk in chunks:
         c.execute("""
-            INSERT INTO documents (filename, content, pages, words)
-            VALUES (?, ?, ?, ?)
-        """, (filename, text, pages, len(text.split())))
-        conn.commit()
-    except:
-        conn.close()
-        return False
+            INSERT INTO chunks (filename, chunk_text)
+            VALUES (?, ?)
+        """, (filename, chunk))
 
-    conn.close()
-    load_existing_data()
-    return True
-
-
-# =============================
-# DELETE DOCUMENT
-# =============================
-
-def delete_document(filename):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("DELETE FROM documents WHERE filename = ?", (filename,))
     conn.commit()
     conn.close()
 
-    file_path = os.path.join(STORAGE_FOLDER, filename)
-    if os.path.exists(file_path):
-        os.remove(file_path)
-
     load_existing_data()
 
 
 # =============================
-# SEARCH (k=3)
+# SEARCH (Top 5 Chunks)
 # =============================
 
 def search_query(query):
-    if len(st.session_state.documents) == 0:
+    if len(st.session_state.chunk_texts) == 0:
         return None
 
     query_vector = st.session_state.embed_model.encode([query])
     D, I = st.session_state.index.search(
-        np.array(query_vector).astype("float32"), k=3
+        np.array(query_vector).astype("float32"), k=5
     )
 
-    combined_text = ""
+    relevant_chunks = ""
+
     for idx in I[0]:
-        if idx < len(st.session_state.documents):
-            combined_text += st.session_state.documents[idx][:1500] + "\n\n"
-
-    return combined_text
-
-
-# =============================
-# IMPORTANT FILES
-# =============================
-
-def get_important_files():
-    return sorted(
-        st.session_state.metadata,
-        key=lambda x: x["importance_score"],
-        reverse=True
-    )
-
-
-# =============================
-# DUPLICATE CHECK (COSINE)
-# =============================
-
-def check_similarity():
-    docs = st.session_state.documents
-    embed_model = st.session_state.embed_model
-
-    if len(docs) < 2:
-        return []
-
-    embeddings = embed_model.encode(docs)
-
-    similarities = []
-
-    for i in range(len(docs)):
-        for j in range(i + 1, len(docs)):
-            sim = np.dot(embeddings[i], embeddings[j]) / (
-                np.linalg.norm(embeddings[i]) *
-                np.linalg.norm(embeddings[j])
+        if idx < len(st.session_state.chunk_texts):
+            relevant_chunks += (
+                st.session_state.chunk_texts[idx] + "\n\n"
             )
-            similarities.append((
-                st.session_state.metadata[i]["filename"],
-                st.session_state.metadata[j]["filename"],
-                sim
-            ))
 
-    return similarities
-
-
-# =============================
-# DASHBOARD
-# =============================
-
-def get_dashboard_stats():
-    total_files = len(st.session_state.metadata)
-    total_pages = sum(file["pages"] for file in st.session_state.metadata)
-    total_words = sum(file["words"] for file in st.session_state.metadata)
-
-    return total_files, total_pages, total_words
+    return relevant_chunks
