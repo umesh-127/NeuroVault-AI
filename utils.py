@@ -46,17 +46,14 @@ def init_session():
         st.session_state.metadata = []
 
     if "index" not in st.session_state:
-        if os.path.exists(INDEX_PATH):
-            st.session_state.index = faiss.read_index(INDEX_PATH)
-        else:
-            st.session_state.index = faiss.IndexFlatL2(EMBED_DIM)
+        st.session_state.index = faiss.IndexFlatL2(EMBED_DIM)
 
     if "model" not in st.session_state:
         initialize_ibm_model()
 
 
 # =============================
-# LOAD EXISTING MEMORY
+# LOAD DATA (PERSISTENT)
 # =============================
 
 def load_existing_data():
@@ -73,18 +70,28 @@ def load_existing_data():
     st.session_state.metadata.clear()
 
     for filename, content, pages, words in rows:
+
+        score = 0
+        if "final" in filename.lower():
+            score += 2
+        if "v2" in filename.lower() or "v3" in filename.lower():
+            score += 1
+        if words > 2000:
+            score += 1
+
         st.session_state.documents.append(content)
         st.session_state.metadata.append({
             "filename": filename,
             "pages": pages,
             "words": words,
-            "content": content
+            "content": content,
+            "importance_score": score
         })
 
-    rebuild_faiss()
+    rebuild_index()
 
 
-def rebuild_faiss():
+def rebuild_index():
     if len(st.session_state.documents) == 0:
         st.session_state.index = faiss.IndexFlatL2(EMBED_DIM)
         return
@@ -111,14 +118,8 @@ def initialize_ibm_model():
 
     st.session_state.model = Model(
         model_id="ibm/granite-3-8b-instruct",
-        params={
-            "max_new_tokens": 300,
-            "temperature": 0.3
-        },
-        credentials={
-            "apikey": api_key,
-            "url": url
-        },
+        params={"max_new_tokens": 300, "temperature": 0.3},
+        credentials={"apikey": api_key, "url": url},
         project_id=project_id
     )
 
@@ -150,8 +151,6 @@ def extract_text(file):
 # =============================
 
 def add_document(text, filename, pages):
-    init_db()
-
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
@@ -189,7 +188,7 @@ def delete_document(filename):
 
 
 # =============================
-# SEARCH
+# SEARCH (k=3)
 # =============================
 
 def search_query(query):
@@ -198,11 +197,57 @@ def search_query(query):
 
     query_vector = st.session_state.embed_model.encode([query])
     D, I = st.session_state.index.search(
-        np.array(query_vector).astype("float32"), k=1
+        np.array(query_vector).astype("float32"), k=3
     )
 
-    idx = I[0][0]
-    return st.session_state.documents[idx]
+    combined_text = ""
+    for idx in I[0]:
+        if idx < len(st.session_state.documents):
+            combined_text += st.session_state.documents[idx][:1500] + "\n\n"
+
+    return combined_text
+
+
+# =============================
+# IMPORTANT FILES
+# =============================
+
+def get_important_files():
+    return sorted(
+        st.session_state.metadata,
+        key=lambda x: x["importance_score"],
+        reverse=True
+    )
+
+
+# =============================
+# DUPLICATE CHECK (COSINE)
+# =============================
+
+def check_similarity():
+    docs = st.session_state.documents
+    embed_model = st.session_state.embed_model
+
+    if len(docs) < 2:
+        return []
+
+    embeddings = embed_model.encode(docs)
+
+    similarities = []
+
+    for i in range(len(docs)):
+        for j in range(i + 1, len(docs)):
+            sim = np.dot(embeddings[i], embeddings[j]) / (
+                np.linalg.norm(embeddings[i]) *
+                np.linalg.norm(embeddings[j])
+            )
+            similarities.append((
+                st.session_state.metadata[i]["filename"],
+                st.session_state.metadata[j]["filename"],
+                sim
+            ))
+
+    return similarities
 
 
 # =============================
