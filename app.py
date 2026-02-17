@@ -1,209 +1,217 @@
 import streamlit as st
 import os
-import faiss
+import sqlite3
 import numpy as np
+import PyPDF2
+import faiss
+from sentence_transformers import SentenceTransformer
+from ibm_watsonx_ai.foundation_models import Model
 
-from utils import (
-    extract_text,
-    add_to_index,
-    search_query,
-    generate_response,
-    get_important_files,
-    check_similarity,
-    get_dashboard_stats,
-    generate_timeline,
-    init_session,
-    load_existing_data
-)
+DB_PATH = "database.db"
+INDEX_PATH = "faiss_index.index"
+STORAGE_FOLDER = "storage"
+EMBED_DIM = 384
 
-st.set_page_config(page_title="NeuroVault AI", layout="wide")
 
-# =========================
-# INIT SESSION + LOAD DATA
-# =========================
+# =============================
+# INITIALIZATION
+# =============================
 
-init_session()
-load_existing_data()
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
 
-st.title("🧠 NeuroVault - AI Storage Intelligence System")
-
-# =========================
-# FILE UPLOAD
-# =========================
-
-uploaded_files = st.file_uploader(
-    "Upload PDF files",
-    type="pdf",
-    accept_multiple_files=True
-)
-
-# Ensure storage folder exists
-os.makedirs("storage", exist_ok=True)
-
-# =========================
-# HANDLE FILE REMOVAL
-# =========================
-
-current_filenames = [file.name for file in uploaded_files] if uploaded_files else []
-stored_filenames = [file["filename"] for file in st.session_state.metadata]
-
-files_removed = False
-
-for stored in stored_filenames:
-    if stored not in current_filenames:
-        index_to_remove = next(
-            i for i, file in enumerate(st.session_state.metadata)
-            if file["filename"] == stored
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            filename TEXT UNIQUE,
+            content TEXT,
+            pages INTEGER,
+            words INTEGER
         )
+    """)
 
-        # Remove from session memory
-        st.session_state.metadata.pop(index_to_remove)
-        st.session_state.documents.pop(index_to_remove)
+    conn.commit()
+    conn.close()
 
-        # Remove from database
-        import sqlite3
-        conn = sqlite3.connect("database.db")
-        c = conn.cursor()
-        c.execute("DELETE FROM documents WHERE filename = ?", (stored,))
+
+def init_session():
+    if "embed_model" not in st.session_state:
+        st.session_state.embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+    if "documents" not in st.session_state:
+        st.session_state.documents = []
+
+    if "metadata" not in st.session_state:
+        st.session_state.metadata = []
+
+    if "index" not in st.session_state:
+        if os.path.exists(INDEX_PATH):
+            st.session_state.index = faiss.read_index(INDEX_PATH)
+        else:
+            st.session_state.index = faiss.IndexFlatL2(EMBED_DIM)
+
+    if "model" not in st.session_state:
+        initialize_ibm_model()
+
+
+# =============================
+# LOAD EXISTING MEMORY
+# =============================
+
+def load_existing_data():
+    init_session()
+    init_db()
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT filename, content, pages, words FROM documents")
+    rows = c.fetchall()
+    conn.close()
+
+    st.session_state.documents.clear()
+    st.session_state.metadata.clear()
+
+    for filename, content, pages, words in rows:
+        st.session_state.documents.append(content)
+        st.session_state.metadata.append({
+            "filename": filename,
+            "pages": pages,
+            "words": words,
+            "content": content
+        })
+
+    rebuild_faiss()
+
+
+def rebuild_faiss():
+    if len(st.session_state.documents) == 0:
+        st.session_state.index = faiss.IndexFlatL2(EMBED_DIM)
+        return
+
+    embeddings = st.session_state.embed_model.encode(
+        st.session_state.documents
+    )
+
+    index = faiss.IndexFlatL2(EMBED_DIM)
+    index.add(np.array(embeddings).astype("float32"))
+    faiss.write_index(index, INDEX_PATH)
+
+    st.session_state.index = index
+
+
+# =============================
+# IBM MODEL
+# =============================
+
+def initialize_ibm_model():
+    api_key = st.secrets["IBM_API_KEY"]
+    project_id = st.secrets["IBM_PROJECT_ID"]
+    url = st.secrets["IBM_URL"]
+
+    st.session_state.model = Model(
+        model_id="ibm/granite-3-8b-instruct",
+        params={
+            "max_new_tokens": 300,
+            "temperature": 0.3
+        },
+        credentials={
+            "apikey": api_key,
+            "url": url
+        },
+        project_id=project_id
+    )
+
+
+def generate_response(prompt):
+    response = st.session_state.model.generate(prompt)
+    return response["results"][0]["generated_text"]
+
+
+# =============================
+# PDF EXTRACTION
+# =============================
+
+def extract_text(file):
+    reader = PyPDF2.PdfReader(file)
+    text = ""
+    pages = len(reader.pages)
+
+    for page in reader.pages:
+        page_text = page.extract_text()
+        if page_text:
+            text += page_text
+
+    return text, pages
+
+
+# =============================
+# ADD DOCUMENT
+# =============================
+
+def add_document(text, filename, pages):
+    init_db()
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+
+    try:
+        c.execute("""
+            INSERT INTO documents (filename, content, pages, words)
+            VALUES (?, ?, ?, ?)
+        """, (filename, text, pages, len(text.split())))
         conn.commit()
+    except:
         conn.close()
+        return False
 
-        # Remove physical file
-        file_path = os.path.join("storage", stored)
-        if os.path.exists(file_path):
-            os.remove(file_path)
+    conn.close()
+    load_existing_data()
+    return True
 
-        files_removed = True
 
-# Rebuild FAISS if something removed
-if files_removed:
-    st.session_state.index = faiss.IndexFlatL2(384)
+# =============================
+# DELETE DOCUMENT
+# =============================
 
-    if len(st.session_state.documents) > 0:
-        embeddings = st.session_state.embed_model.encode(
-            st.session_state.documents
-        )
-        st.session_state.index.add(
-            np.array(embeddings).astype("float32")
-        )
-        faiss.write_index(st.session_state.index, "faiss_index.index")
+def delete_document(filename):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM documents WHERE filename = ?", (filename,))
+    conn.commit()
+    conn.close()
 
-# =========================
-# ADD NEW FILES
-# =========================
+    file_path = os.path.join(STORAGE_FOLDER, filename)
+    if os.path.exists(file_path):
+        os.remove(file_path)
 
-if uploaded_files:
-    for file in uploaded_files:
-        if file.name not in stored_filenames:
+    load_existing_data()
 
-            # Save file physically
-            file_path = os.path.join("storage", file.name)
-            with open(file_path, "wb") as f:
-                f.write(file.getbuffer())
 
-            text, pages = extract_text(file)
-            add_to_index(text, file.name, pages)
+# =============================
+# SEARCH
+# =============================
 
-    st.success("Files indexed successfully!")
+def search_query(query):
+    if len(st.session_state.documents) == 0:
+        return None
 
-# =========================
+    query_vector = st.session_state.embed_model.encode([query])
+    D, I = st.session_state.index.search(
+        np.array(query_vector).astype("float32"), k=1
+    )
+
+    idx = I[0][0]
+    return st.session_state.documents[idx]
+
+
+# =============================
 # DASHBOARD
-# =========================
+# =============================
 
-st.sidebar.header("📊 Storage Dashboard")
+def get_dashboard_stats():
+    total_files = len(st.session_state.metadata)
+    total_pages = sum(file["pages"] for file in st.session_state.metadata)
+    total_words = sum(file["words"] for file in st.session_state.metadata)
 
-total_files, total_pages, total_words = get_dashboard_stats()
-
-st.sidebar.metric("Total Files", total_files)
-st.sidebar.metric("Total Pages", total_pages)
-st.sidebar.metric("Total Words Indexed", total_words)
-
-st.markdown("---")
-
-# =========================
-# QUICK ACTIONS
-# =========================
-
-col1, col2, col3, col4, col5 = st.columns(5)
-
-with col1:
-    if st.button("📌 Important Files"):
-        if total_files == 0:
-            st.warning("No files uploaded.")
-        else:
-            important = get_important_files()
-            for file in important:
-                st.write(f"{file['filename']} → Score: {file['importance_score']}")
-
-with col2:
-    if st.button("🔍 Duplicate Check"):
-        if total_files < 2:
-            st.info("Upload at least 2 files to check similarity.")
-        else:
-            sims = check_similarity()
-            found = False
-            for file1, file2, sim in sims:
-                if sim > 0.75:
-                    st.write(f"{file1} and {file2} are {sim:.2f} similar")
-                    found = True
-            if not found:
-                st.info("No highly similar files detected.")
-
-with col3:
-    if st.button("📊 File Count"):
-        st.write(f"You have uploaded {total_files} files.")
-
-with col4:
-    if st.button("📝 Summarize Latest"):
-        if total_files == 0:
-            st.warning("No files uploaded.")
-        else:
-            latest = st.session_state.metadata[-1]
-            prompt = f"Summarize this document:\n\n{latest['content'][:2000]}"
-            summary = generate_response(prompt)
-            st.write(summary)
-
-with col5:
-    if st.button("📈 Memory Timeline"):
-        if total_files < 2:
-            st.info("Upload at least 2 files to detect evolution.")
-        else:
-            timeline = generate_timeline()
-            if not timeline:
-                st.info("No version evolution detected.")
-            else:
-                for file1, file2, evolution in timeline:
-                    st.subheader(f"{file1} → {file2}")
-                    st.write(evolution)
-
-st.markdown("---")
-
-# =========================
-# CHAT SECTION
-# =========================
-
-st.subheader("💬 Ask NeuroVault")
-
-question = st.text_input("Type your question")
-
-if st.button("Submit"):
-    if total_files == 0:
-        st.warning("Upload at least one file first.")
-    elif question.strip() == "":
-        st.warning("Please enter a question.")
-    else:
-        relevant_doc = search_query(question)
-
-        prompt = f"""
-        Based on the following document:
-
-        {relevant_doc}
-
-        Answer this question:
-        {question}
-        """
-
-        response = generate_response(prompt)
-
-        st.subheader("NeuroVault Response")
-        st.write(response)
+    return total_files, total_pages, total_words
