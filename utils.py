@@ -1,107 +1,31 @@
 import streamlit as st
-import os
-import sqlite3
 import numpy as np
 import PyPDF2
 import faiss
 from sentence_transformers import SentenceTransformer
 from ibm_watsonx_ai.foundation_models import Model
 
-DB_PATH = "database.db"
-INDEX_PATH = "faiss_index.index"
-STORAGE_FOLDER = "storage"
-EMBED_DIM = 384
-CHUNK_SIZE = 800
-CHUNK_OVERLAP = 200
-
 
 # =============================
-# INITIALIZATION
+# SESSION INITIALIZATION
 # =============================
-
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS chunks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename TEXT,
-            chunk_text TEXT
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-
 
 def init_session():
+
+    if "documents" not in st.session_state:
+        st.session_state.documents = []
+
+    if "metadata" not in st.session_state:
+        st.session_state.metadata = []
+
+    if "index" not in st.session_state:
+        st.session_state.index = faiss.IndexFlatL2(384)
+
     if "embed_model" not in st.session_state:
         st.session_state.embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-    if "index" not in st.session_state:
-        if os.path.exists(INDEX_PATH):
-            st.session_state.index = faiss.read_index(INDEX_PATH)
-        else:
-            st.session_state.index = faiss.IndexFlatL2(EMBED_DIM)
-
-    if "chunk_texts" not in st.session_state:
-        st.session_state.chunk_texts = []
-
     if "model" not in st.session_state:
         initialize_ibm_model()
-
-
-# =============================
-# CHUNKING FUNCTION
-# =============================
-
-def chunk_text(text):
-    chunks = []
-    start = 0
-
-    while start < len(text):
-        end = start + CHUNK_SIZE
-        chunk = text[start:end]
-        chunks.append(chunk)
-        start += CHUNK_SIZE - CHUNK_OVERLAP
-
-    return chunks
-
-
-# =============================
-# LOAD EXISTING DATA
-# =============================
-
-def load_existing_data():
-    init_session()
-    init_db()
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT chunk_text FROM chunks")
-    rows = c.fetchall()
-    conn.close()
-
-    st.session_state.chunk_texts = [row[0] for row in rows]
-
-    rebuild_index()
-
-
-def rebuild_index():
-    if len(st.session_state.chunk_texts) == 0:
-        st.session_state.index = faiss.IndexFlatL2(EMBED_DIM)
-        return
-
-    embeddings = st.session_state.embed_model.encode(
-        st.session_state.chunk_texts
-    )
-
-    index = faiss.IndexFlatL2(EMBED_DIM)
-    index.add(np.array(embeddings).astype("float32"))
-    faiss.write_index(index, INDEX_PATH)
-
-    st.session_state.index = index
 
 
 # =============================
@@ -109,14 +33,21 @@ def rebuild_index():
 # =============================
 
 def initialize_ibm_model():
+
     api_key = st.secrets["IBM_API_KEY"]
     project_id = st.secrets["IBM_PROJECT_ID"]
     url = st.secrets["IBM_URL"]
 
     st.session_state.model = Model(
         model_id="ibm/granite-3-8b-instruct",
-        params={"max_new_tokens": 400, "temperature": 0.2},
-        credentials={"apikey": api_key, "url": url},
+        params={
+            "max_new_tokens": 300,
+            "temperature": 0.3
+        },
+        credentials={
+            "apikey": api_key,
+            "url": url
+        },
         project_id=project_id
     )
 
@@ -133,58 +64,168 @@ def generate_response(prompt):
 def extract_text(file):
     reader = PyPDF2.PdfReader(file)
     text = ""
+    pages = len(reader.pages)
 
     for page in reader.pages:
         page_text = page.extract_text()
         if page_text:
-            text += page_text + "\n"
+            text += page_text
 
-    return text
-
-
-# =============================
-# ADD DOCUMENT (Chunk Based)
-# =============================
-
-def add_document(text, filename):
-    init_db()
-
-    chunks = chunk_text(text)
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
-    for chunk in chunks:
-        c.execute("""
-            INSERT INTO chunks (filename, chunk_text)
-            VALUES (?, ?)
-        """, (filename, chunk))
-
-    conn.commit()
-    conn.close()
-
-    load_existing_data()
+    return text, pages
 
 
 # =============================
-# SEARCH (Top 5 Chunks)
+# ADD TO INDEX
+# =============================
+
+def add_to_index(text, filename, pages):
+
+    if text in st.session_state.documents:
+        return
+
+    embedding = st.session_state.embed_model.encode([text])
+    st.session_state.index.add(np.array(embedding).astype("float32"))
+
+    score = 0
+    if "final" in filename.lower():
+        score += 2
+    if "v2" in filename.lower() or "v3" in filename.lower():
+        score += 1
+    if len(text) > 2000:
+        score += 1
+
+    st.session_state.documents.append(text)
+
+    st.session_state.metadata.append({
+        "filename": filename,
+        "importance_score": score,
+        "pages": pages,
+        "words": len(text.split()),
+        "content": text
+    })
+
+
+# =============================
+# SEARCH
 # =============================
 
 def search_query(query):
-    if len(st.session_state.chunk_texts) == 0:
-        return None
+
+    if len(st.session_state.documents) == 0:
+        return "No documents indexed yet."
+
+    if st.session_state.index.ntotal == 0:
+        return "Search index is empty."
 
     query_vector = st.session_state.embed_model.encode([query])
+
     D, I = st.session_state.index.search(
-        np.array(query_vector).astype("float32"), k=5
+        np.array(query_vector).astype("float32"), k=1
     )
 
-    relevant_chunks = ""
+    idx = I[0][0]
 
-    for idx in I[0]:
-        if idx < len(st.session_state.chunk_texts):
-            relevant_chunks += (
-                st.session_state.chunk_texts[idx] + "\n\n"
+    if idx >= len(st.session_state.documents):
+        return "Search mismatch error."
+
+    return st.session_state.documents[idx]
+
+
+# =============================
+# IMPORTANT FILES
+# =============================
+
+def get_important_files():
+    return sorted(
+        st.session_state.metadata,
+        key=lambda x: x["importance_score"],
+        reverse=True
+    )
+
+
+# =============================
+# DUPLICATE CHECK
+# =============================
+
+def check_similarity():
+
+    docs = st.session_state.documents
+
+    if len(docs) < 2:
+        return []
+
+    embeddings = st.session_state.embed_model.encode(docs)
+
+    similarities = []
+
+    for i in range(len(docs)):
+        for j in range(i + 1, len(docs)):
+
+            sim = np.dot(
+                embeddings[i],
+                embeddings[j]
             )
 
-    return relevant_chunks
+            similarities.append(
+                (
+                    st.session_state.metadata[i]["filename"],
+                    st.session_state.metadata[j]["filename"],
+                    sim
+                )
+            )
+
+    return similarities
+
+
+# =============================
+# DASHBOARD
+# =============================
+
+def get_dashboard_stats():
+
+    total_files = len(st.session_state.metadata)
+    total_pages = sum(file["pages"] for file in st.session_state.metadata)
+    total_words = sum(file["words"] for file in st.session_state.metadata)
+
+    return total_files, total_pages, total_words
+
+
+# =============================
+# MEMORY TIMELINE
+# =============================
+
+def generate_timeline():
+
+    similarities = check_similarity()
+    timeline = []
+
+    for file1, file2, sim in similarities:
+
+        if sim > 0.75:
+
+            doc1 = next(
+                item for item in st.session_state.metadata
+                if item["filename"] == file1
+            )
+
+            doc2 = next(
+                item for item in st.session_state.metadata
+                if item["filename"] == file2
+            )
+
+            prompt = f"""
+Compare these two document versions.
+
+Document A:
+{doc1["content"][:1500]}
+
+Document B:
+{doc2["content"][:1500]}
+
+Explain how they evolved.
+"""
+
+            evolution = generate_response(prompt)
+            timeline.append((file1, file2, evolution))
+
+    return timeline
