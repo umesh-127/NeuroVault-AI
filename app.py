@@ -1,217 +1,106 @@
 import streamlit as st
 import os
-import sqlite3
-import numpy as np
-import PyPDF2
-import faiss
-from sentence_transformers import SentenceTransformer
-from ibm_watsonx_ai.foundation_models import Model
+from utils import (
+    init_session,
+    load_existing_data,
+    extract_text,
+    add_document,
+    delete_document,
+    search_query,
+    generate_response,
+    get_dashboard_stats
+)
 
-DB_PATH = "database.db"
-INDEX_PATH = "faiss_index.index"
-STORAGE_FOLDER = "storage"
-EMBED_DIM = 384
+st.set_page_config(page_title="NeuroVault AI", layout="wide")
 
+init_session()
+load_existing_data()
 
-# =============================
-# INITIALIZATION
-# =============================
+st.title("🧠 NeuroVault - Persistent AI Memory System")
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+os.makedirs("storage", exist_ok=True)
 
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS documents (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename TEXT UNIQUE,
-            content TEXT,
-            pages INTEGER,
-            words INTEGER
-        )
-    """)
+# =========================
+# FILE UPLOAD
+# =========================
 
-    conn.commit()
-    conn.close()
+uploaded_files = st.file_uploader(
+    "Upload PDF files",
+    type="pdf",
+    accept_multiple_files=True
+)
 
+if uploaded_files:
+    for file in uploaded_files:
+        file_path = os.path.join("storage", file.name)
 
-def init_session():
-    if "embed_model" not in st.session_state:
-        st.session_state.embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+        if not os.path.exists(file_path):
+            with open(file_path, "wb") as f:
+                f.write(file.getbuffer())
 
-    if "documents" not in st.session_state:
-        st.session_state.documents = []
+            text, pages = extract_text(file)
+            success = add_document(text, file.name, pages)
 
-    if "metadata" not in st.session_state:
-        st.session_state.metadata = []
+            if success:
+                st.success(f"{file.name} indexed successfully!")
 
-    if "index" not in st.session_state:
-        if os.path.exists(INDEX_PATH):
-            st.session_state.index = faiss.read_index(INDEX_PATH)
-        else:
-            st.session_state.index = faiss.IndexFlatL2(EMBED_DIM)
-
-    if "model" not in st.session_state:
-        initialize_ibm_model()
-
-
-# =============================
-# LOAD EXISTING MEMORY
-# =============================
-
-def load_existing_data():
-    init_session()
-    init_db()
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT filename, content, pages, words FROM documents")
-    rows = c.fetchall()
-    conn.close()
-
-    st.session_state.documents.clear()
-    st.session_state.metadata.clear()
-
-    for filename, content, pages, words in rows:
-        st.session_state.documents.append(content)
-        st.session_state.metadata.append({
-            "filename": filename,
-            "pages": pages,
-            "words": words,
-            "content": content
-        })
-
-    rebuild_faiss()
-
-
-def rebuild_faiss():
-    if len(st.session_state.documents) == 0:
-        st.session_state.index = faiss.IndexFlatL2(EMBED_DIM)
-        return
-
-    embeddings = st.session_state.embed_model.encode(
-        st.session_state.documents
-    )
-
-    index = faiss.IndexFlatL2(EMBED_DIM)
-    index.add(np.array(embeddings).astype("float32"))
-    faiss.write_index(index, INDEX_PATH)
-
-    st.session_state.index = index
-
-
-# =============================
-# IBM MODEL
-# =============================
-
-def initialize_ibm_model():
-    api_key = st.secrets["IBM_API_KEY"]
-    project_id = st.secrets["IBM_PROJECT_ID"]
-    url = st.secrets["IBM_URL"]
-
-    st.session_state.model = Model(
-        model_id="ibm/granite-3-8b-instruct",
-        params={
-            "max_new_tokens": 300,
-            "temperature": 0.3
-        },
-        credentials={
-            "apikey": api_key,
-            "url": url
-        },
-        project_id=project_id
-    )
-
-
-def generate_response(prompt):
-    response = st.session_state.model.generate(prompt)
-    return response["results"][0]["generated_text"]
-
-
-# =============================
-# PDF EXTRACTION
-# =============================
-
-def extract_text(file):
-    reader = PyPDF2.PdfReader(file)
-    text = ""
-    pages = len(reader.pages)
-
-    for page in reader.pages:
-        page_text = page.extract_text()
-        if page_text:
-            text += page_text
-
-    return text, pages
-
-
-# =============================
-# ADD DOCUMENT
-# =============================
-
-def add_document(text, filename, pages):
-    init_db()
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
-    try:
-        c.execute("""
-            INSERT INTO documents (filename, content, pages, words)
-            VALUES (?, ?, ?, ?)
-        """, (filename, text, pages, len(text.split())))
-        conn.commit()
-    except:
-        conn.close()
-        return False
-
-    conn.close()
-    load_existing_data()
-    return True
-
-
-# =============================
-# DELETE DOCUMENT
-# =============================
-
-def delete_document(filename):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("DELETE FROM documents WHERE filename = ?", (filename,))
-    conn.commit()
-    conn.close()
-
-    file_path = os.path.join(STORAGE_FOLDER, filename)
-    if os.path.exists(file_path):
-        os.remove(file_path)
-
-    load_existing_data()
-
-
-# =============================
-# SEARCH
-# =============================
-
-def search_query(query):
-    if len(st.session_state.documents) == 0:
-        return None
-
-    query_vector = st.session_state.embed_model.encode([query])
-    D, I = st.session_state.index.search(
-        np.array(query_vector).astype("float32"), k=1
-    )
-
-    idx = I[0][0]
-    return st.session_state.documents[idx]
-
-
-# =============================
+# =========================
 # DASHBOARD
-# =============================
+# =========================
 
-def get_dashboard_stats():
-    total_files = len(st.session_state.metadata)
-    total_pages = sum(file["pages"] for file in st.session_state.metadata)
-    total_words = sum(file["words"] for file in st.session_state.metadata)
+st.sidebar.header("📊 Storage Dashboard")
 
-    return total_files, total_pages, total_words
+total_files, total_pages, total_words = get_dashboard_stats()
+
+st.sidebar.metric("Total Files", total_files)
+st.sidebar.metric("Total Pages", total_pages)
+st.sidebar.metric("Total Words Indexed", total_words)
+
+st.sidebar.markdown("---")
+
+# =========================
+# DELETE FILE OPTION
+# =========================
+
+if total_files > 0:
+    st.sidebar.subheader("🗑 Delete File")
+    filenames = [file["filename"] for file in st.session_state.metadata]
+    selected = st.sidebar.selectbox("Select file", filenames)
+
+    if st.sidebar.button("Delete"):
+        delete_document(selected)
+        st.success("File deleted successfully!")
+        st.rerun()
+
+# =========================
+# CHAT SECTION
+# =========================
+
+st.subheader("💬 Ask NeuroVault")
+
+question = st.text_input("Type your question")
+
+if st.button("Submit"):
+    if total_files == 0:
+        st.warning("Upload at least one file first.")
+    elif question.strip() == "":
+        st.warning("Please enter a question.")
+    else:
+        relevant_doc = search_query(question)
+
+        if relevant_doc is None:
+            st.warning("No relevant document found.")
+        else:
+            prompt = f"""
+            Based on the following document:
+
+            {relevant_doc[:3000]}
+
+            Answer this question:
+            {question}
+            """
+
+            response = generate_response(prompt)
+
+            st.subheader("NeuroVault Response")
+            st.write(response)
