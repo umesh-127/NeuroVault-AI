@@ -8,20 +8,25 @@ from utils import (
     delete_document,
     search_query,
     generate_response,
-    get_dashboard_stats
+    get_dashboard_stats,
+    get_important_files,
+    check_similarity
 )
 
 st.set_page_config(page_title="NeuroVault AI", layout="wide")
 
+# =========================
+# INITIALIZE SYSTEM
+# =========================
+
 init_session()
 load_existing_data()
+os.makedirs("storage", exist_ok=True)
 
 st.title("🧠 NeuroVault - Persistent AI Memory System")
 
-os.makedirs("storage", exist_ok=True)
-
 # =========================
-# FILE UPLOAD
+# FILE UPLOAD SECTION
 # =========================
 
 uploaded_files = st.file_uploader(
@@ -45,7 +50,7 @@ if uploaded_files:
                 st.success(f"{file.name} indexed successfully!")
 
 # =========================
-# DASHBOARD
+# SIDEBAR DASHBOARD
 # =========================
 
 st.sidebar.header("📊 Storage Dashboard")
@@ -67,10 +72,54 @@ if total_files > 0:
     filenames = [file["filename"] for file in st.session_state.metadata]
     selected = st.sidebar.selectbox("Select file", filenames)
 
-    if st.sidebar.button("Delete"):
+    if st.sidebar.button("Delete File"):
         delete_document(selected)
         st.success("File deleted successfully!")
         st.rerun()
+
+# =========================
+# QUICK ACTION BUTTONS
+# =========================
+
+st.markdown("## ⚡ Quick Actions")
+
+col1, col2, col3 = st.columns(3)
+
+# Important Files
+with col1:
+    if st.button("📌 Important Files"):
+        if total_files == 0:
+            st.warning("No files uploaded.")
+        else:
+            important = get_important_files()
+            for file in important:
+                st.write(
+                    f"{file['filename']} → Score: {file['importance_score']}"
+                )
+
+# Duplicate Check
+with col2:
+    if st.button("🔍 Duplicate Check"):
+        if total_files < 2:
+            st.warning("Upload at least 2 files.")
+        else:
+            sims = check_similarity()
+            found = False
+            for file1, file2, sim in sims:
+                if sim > 0.80:
+                    st.write(
+                        f"{file1} and {file2} are {sim:.2f} similar"
+                    )
+                    found = True
+            if not found:
+                st.info("No highly similar documents found.")
+
+# File Count
+with col3:
+    if st.button("📊 File Count"):
+        st.info(f"You have uploaded {total_files} files.")
+
+st.markdown("---")
 
 # =========================
 # CHAT SECTION
@@ -80,27 +129,30 @@ st.subheader("💬 Ask NeuroVault")
 
 question = st.text_input("Type your question")
 
-if st.button("Submit"):
+if st.button("Submit Question"):
     if total_files == 0:
         st.warning("Upload at least one file first.")
     elif question.strip() == "":
         st.warning("Please enter a question.")
     else:
-        relevant_doc = search_query(question)
+        relevant_docs = search_query(question)
 
-        if relevant_doc is None:
+        if relevant_docs is None:
             st.warning("No relevant document found.")
         else:
             prompt = f"""
-            Based on the following document:
+You are an intelligent AI assistant.
 
-            {relevant_doc[:3000]}
+Based on the following documents:
 
-            Answer this question:
-            {question}
-            """
+{relevant_docs}
+
+Answer this question clearly and concisely:
+
+{question}
+"""
 
             response = generate_response(prompt)
 
-            st.subheader("NeuroVault Response")
+            st.subheader("🧠 NeuroVault Response")
             st.write(response)
